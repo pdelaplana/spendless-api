@@ -1,60 +1,127 @@
+import { AuthHelper } from './../shared/auth-helper';
 import * as express from 'express';
-import * as admin from 'firebase-admin';
 import * as moment from 'moment';
 import { Spending } from '../models/spending';
 import { ApiResponse } from '../models/api-response';
-import { helpers } from '../shared/helpers';
+
 
 export const spendingEndpoint =  (db: FirebaseFirestore.Firestore) => {
   const endpoint = express();
+  const authHelper = AuthHelper();
+  const pageSize = 10;
+
+  const buildQuery = async (uid:string, startDate:Date, endDate:Date, size:number = 10 ) => {
+    const spendingList: Spending[] = [];
+
+    const query = db.collection('accounts').doc(uid).collection('spending')
+      .where('date', '>', startDate)
+      .where('date', '<=', endDate)
+      .orderBy('date', 'desc');
+      //.limit(size); TODO: Temporarily disable paging logic
+
+    await query.get().then(results => {
+      results.forEach(
+        (doc) => {
+          spendingList.push(<Spending>{
+            id: doc.id, 
+            date: doc.get('date').toDate(),
+            amount: doc.get('amount'),
+            description: doc.get('description'),
+            location: doc.get('location'),
+            category: doc.get('category'),
+            notes: doc.get('notes')
+          })
+        }
+      );
+    });
+    
+    return spendingList;
+  }
+
+  const buildQueryFromLastDoc = async (uid: string, id: string, startDate:Date, endDate:Date, size: number = 10) => {
+    const spendingList: Spending[] = [];
+    const account = db.collection('accounts').doc(uid);
+
+    await account.collection('spending').doc(id).get().then(async snapshot  => {
+      
+      const query = account.collection('spending')
+                .where('date', '>', startDate)
+                .where('date', '<=', endDate)
+                .orderBy('date', 'desc')
+                .startAfter(snapshot.get('date'));
+                //.limit(size); TODO: Temporarily disable paging logic
+      await query.get()
+          .then(items => {
+            items.forEach(
+              (doc) => {
+                spendingList.push(<Spending>{
+                  id: doc.id, 
+                  date: doc.get('date').toDate(),
+                  amount: doc.get('amount'),
+                  description: doc.get('description'),
+                  location: doc.get('location'),
+                  category: doc.get('category'),
+                  notes: doc.get('notes')
+                })
+              }
+            )
+          })
+          .catch(error => console.error(error));
+      
+    }).catch(error => console.error(error))
+
+    return spendingList;
+
+    
+  }
 
   // get list of spending
   endpoint.get('/', async (request, response) => {
 
     try {
 
-      const idToken = helpers.getToken(request);
-
-      admin.auth().verifyIdToken(idToken).then(async (decoded) => {
+      authHelper.decodeToken(request).then(async (decoded) => {
+ 
+        console.info('endpoint: api/spending/get', request);
 
         const uid = decoded.uid;
-        const month = request.query.m || moment().format('MMM');
-        const year = request.query.y || moment().format('YYYY');
+        // const lastDocId = request.query.last ?? null;
+        const lastDocId = null;  // TODO: temporarily disable paging location
+        const size: number = request.query.size ? parseInt(request.query.size) : pageSize;
+        const month = request.query.m ?? moment().format('MMM');
+        const year = request.query.y ?? moment().format('YYYY');
+
         const startDate = moment(`${month}-1-${year}`,'MMM-D-YYYY');
         const endDate = moment(startDate).endOf('month');
-        console.log(startDate);
-        console.log(endDate);
-        const query = db.collection('accounts').doc(uid).collection('spending');
 
-        const result = await query.where('date', '>', startDate.toDate()).where('date', '<=', endDate.toDate()).get();
-        const spendingList: Spending[] = [];
-        result.forEach(
-          (doc) => {
-            spendingList.push(<Spending>{
-              id: doc.id, 
-              date: doc.get('date').toDate(),
-              amount: doc.get('amount'),
-              description: doc.get('description'),
-              location: doc.get('location'),
-              category: doc.get('category'),
-              notes: doc.get('notes')
+        if (lastDocId !== null){
+
+          await buildQueryFromLastDoc(uid, lastDocId, startDate.toDate(), endDate.toDate(), size)
+            .then(result => {
+              response.json(<ApiResponse>{
+                code: 'OK',
+                description: 'Spending[]', 
+                data: result 
+              });
+            });
+            
+        } else {
+
+          await buildQuery(uid, startDate.toDate(), endDate.toDate(), size)
+            .then(result => {
+              response.json(<ApiResponse>{
+                code: 'OK',
+                description: 'Spending[]', 
+                data: result 
+              });
             })
-          }
-        );
-        // const spendingListSortedByDate = spendingList.sort((a: any, b: any) => {
-        //  return a.data.date.getTime() - b.data.date.getTime();
-        // });
-        response.json(<ApiResponse>{
-          code: 'OK',
-          description: 'Spending[]', 
-          data: spendingList 
-        });
-
+        }
+        
       })
       .catch((error) => {
+        console.error('endpoint: /api/account/get', error);
         response.status(401).send(error);
       })
-
 
     } catch (error) {
       response.status(500).send(error);
@@ -67,8 +134,9 @@ export const spendingEndpoint =  (db: FirebaseFirestore.Firestore) => {
 
     try {  
 
-      const idToken = helpers.getToken(request);
-      admin.auth().verifyIdToken(idToken).then(async (decoded) => {
+      authHelper.decodeToken(request).then(async (decoded) => {
+
+        console.info('executing endpoint => api/spending/post');
 
         const uid = decoded.uid;
         const account = db.collection('accounts').doc(uid);
@@ -115,8 +183,7 @@ export const spendingEndpoint =  (db: FirebaseFirestore.Firestore) => {
  
     try {  
       
-      const idToken = helpers.getToken(request);
-      admin.auth().verifyIdToken(idToken).then(async (decoded) => {
+      authHelper.decodeToken(request).then(async (decoded) => {
 
         const uid = decoded.uid;
         const account = db.collection('accounts').doc(uid);
@@ -164,8 +231,7 @@ export const spendingEndpoint =  (db: FirebaseFirestore.Firestore) => {
   endpoint.delete('/', async (request, response) => {
  
     try {  
-      const idToken = helpers.getToken(request);
-      admin.auth().verifyIdToken(idToken).then(async (decoded) => {
+      authHelper.decodeToken(request).then(async (decoded) => {
       
         const uid = decoded.uid;
         const account = db.collection('accounts').doc(uid);
@@ -183,7 +249,6 @@ export const spendingEndpoint =  (db: FirebaseFirestore.Firestore) => {
         
       })
       .catch((error) => { response.status(500).send(error);});
-
 
       
     } catch (error) {
